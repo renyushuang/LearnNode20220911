@@ -76,3 +76,6 @@ public class TimeAspectj {
 
 ### 埋点上传
 
+1.定义注解 获取方法
+
+2.定义参数 注解 获取参数
