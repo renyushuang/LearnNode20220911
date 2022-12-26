@@ -468,4 +468,125 @@ public int relayoutWindow(Session session, IWindow client, int seq, LayoutParams
 
 java层面的surface代表的是用户数据提供
 
-c++层面的surface根据用户数据提供以及，surfaceFlinger的相关关注
+c++层面的surface根据用户数据提供以及surfaceFlinger的相关关注(系统层面东西要附加上去，类似导航条，电池之类)
+
+
+
+relayoutWindow
+
+1. 保存信息到WMS
+
+	2. 判定是否有需要重新计算相关坐标等数据，可见行
+	2. 去顶层申请一个surface ，返回地址回来
+
+ 
+
+```java
+private boolean draw(boolean fullRedrawNeeded) {
+  
+    if (!dirty.isEmpty() || mIsAnimating || accessibilityFocusDirty) {
+        if (mAttachInfo.mThreadedRenderer != null && mAttachInfo.mThreadedRenderer.isEnabled()) {
+   					// 硬件加速的硬件绘制
+            mAttachInfo.mThreadedRenderer.draw(mView, mAttachInfo, this, callback);
+        } else {
+          	// 常规是软件绘制
+            if (!drawSoftware(surface, mAttachInfo, xOffset, yOffset,
+                    scalingRequired, dirty, surfaceInsets)) {
+                return false;
+            }
+        }
+    }
+    return useAsyncReport;
+}
+```
+
+ 
+
+
+
+```java
+private boolean drawSoftware(Surface surface, AttachInfo attachInfo, int xoff, int yoff,
+        boolean scalingRequired, Rect dirty, Rect surfaceInsets) {
+  
+  
+  canvas = mSurface.lockCanvas(dirty);
+  
+  // 主要核心目的是进行绘制请求的发送，最底层是64长度的队列，从队列中提取一个空间，一个空间是一个Surface
+  // 告诉SurfaceFlinger可以消费队列中的消息，推给FrameBuffer
+  surface.unlockCanvasAndPost(canvas);
+  
+```
+
+
+
+Surface lock后，就持有了canvas对象，canvas实际上是bitmap
+
+```c++
+302static jlong nativeLockCanvas(JNIEnv* env, jclass clazz,
+303        jlong nativeObject, jobject canvasObj, jobject dirtyRectObj) {
+304    sp<Surface> surface(reinterpret_cast<Surface *>(nativeObject));
+
+  
+322    ANativeWindow_Buffer outBuffer;
+323    status_t err = surface->lock(&outBuffer, dirtyRectPtr);
+324    if (err < 0) {
+325        const char* const exception = (err == NO_MEMORY) ?
+326                OutOfResourcesException :
+327                "java/lang/IllegalArgumentException";
+328        jniThrowException(env, exception, NULL);
+329        return 0;
+330    }
+331		 // 图像生成 ， 图像引擎生成图像数据-->显示
+332    SkImageInfo info = SkImageInfo::Make(outBuffer.width, outBuffer.height,
+333                                         convertPixelFormat(outBuffer.format),
+334                                         outBuffer.format == PIXEL_FORMAT_RGBX_8888
+335                                                 ? kOpaque_SkAlphaType : kPremul_SkAlphaType,
+336                                         GraphicsJNI::defaultColorSpace());
+337
+338    SkBitmap bitmap;
+339    ssize_t bpr = outBuffer.stride * bytesPerPixel(outBuffer.format);
+340    bitmap.setInfo(info, bpr);
+341    if (outBuffer.width > 0 && outBuffer.height > 0) {
+342        bitmap.setPixels(outBuffer.bits);
+343    } else {
+344        // be safe with an empty bitmap.
+345        bitmap.setPixels(NULL);
+346    }
+347
+348    Canvas* nativeCanvas = GraphicsJNI::getNativeCanvas(env, canvasObj);
+349    nativeCanvas->setBitmap(bitmap);
+350
+  
+366    sp<Surface> lockedSurface(surface);
+367    lockedSurface->incStrong(&sRefBaseOwner);
+368    return (jlong) lockedSurface.get();
+369}
+```
+
+
+
+总结：
+
+1.绘制流程
+
+数据加载——》有一个实例（Activity，View）--->
+
+绘制--》套路（编舞者）——〉具体绘制--》自己准备一个Surface绘制数据——〉
+
+下层准备一个Surface记录数据》canves记录数据——》生成bitmap图像数据——〉
+
+surface再底层存储一个队列，采取的是生产者消费者模式
+
+生产者——》上层（WMS）
+
+消费者——〉surfaceFlinger——》拿到不同的Surface，还有系统的——〉framebuffer进行展示
+
+
+
+2.WMS扮演的角色是数据管理者，与Surface，与surfaceflinger的通信协调
+
+
+
+3.AMS
+
+AMS XML数据管理者
