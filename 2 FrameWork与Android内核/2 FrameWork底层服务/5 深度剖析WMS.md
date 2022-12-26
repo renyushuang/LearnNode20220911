@@ -160,5 +160,312 @@ if (isRunningOnLooperThreadLocked()) {
 
 
 
+```java
+private static native void nativeScheduleVsync(long receiverPtr);
+```
+
+```java
+65status_t DisplayEventDispatcher::scheduleVsync() {
+66    if (!mWaitingForVsync) {
+67        ALOGV("dispatcher %p ~ Scheduling vsync.", this);
+68
+69        // Drain all pending events.
+70        nsecs_t vsyncTimestamp;
+71        int32_t vsyncDisplayId;
+72        uint32_t vsyncCount;
+73        if (processPendingEvents(&vsyncTimestamp, &vsyncDisplayId, &vsyncCount)) {
+74            ALOGE("dispatcher %p ~ last event processed while scheduling was for %" PRId64 "",
+75                    this, ns2ms(static_cast<nsecs_t>(vsyncTimestamp)));
+76        }
+77				// 请求垂直同步信号，最终请求到哪里
+78        status_t status = mReceiver.requestNextVsync();
+79        if (status) {
+80            ALOGW("Failed to request next vsync, status=%d", status);
+81            return status;
+82        }
+83
+84        mWaitingForVsync = true;
+85    }
+86    return OK;
+87}
+```
+
+Surfaceflinger
+
+帧缓冲区
+
+三个核心线程，UI线程、Binder线程、事件处理线程
 
 
+
+发送完同步信号之后，将会分发事件
+
+```java
+private void dispatchVsync(long timestampNanos, int builtInDisplayId, int frame) {
+    onVsync(timestampNanos, builtInDisplayId, frame);
+}
+```
+
+```java
+private final class FrameDisplayEventReceiver extends DisplayEventReceiver
+        implements Runnable {
+    @Override
+    public void onVsync(long timestampNanos, int builtInDisplayId, int frame) {
+  
+				//通过handler进行绘制
+        mTimestampNanos = timestampNanos;
+        mFrame = frame;
+        Message msg = Message.obtain(mHandler, this);
+        msg.setAsynchronous(true);
+        mHandler.sendMessageAtTime(msg, timestampNanos / TimeUtils.NANOS_PER_MS);
+    }
+
+    @Override
+    public void run() {
+        mHavePendingVsync = false;
+        doFrame(mTimestampNanos, mFrame);
+    }
+}
+```
+
+```java
+// 所谓的垂直同步信号，就是去底层驱动，你绘制上一帧的时间
+void doFrame(long frameTimeNanos, int frame) {
+    final long startNanos;
+    synchronized (mLock) {
+        if (!mFrameScheduled) {
+            return; // no work to do
+        }
+
+        if (DEBUG_JANK && mDebugPrintNextFrameTimeDelta) {
+            mDebugPrintNextFrameTimeDelta = false;
+            Log.d(TAG, "Frame time delta: "
+                    + ((frameTimeNanos - mLastFrameTimeNanos) * 0.000001f) + " ms");
+        }
+
+        long intendedFrameTimeNanos = frameTimeNanos;
+        startNanos = System.nanoTime();// 包括了下层的通信和回调
+      	// 当前时间减去vsync来的时间，相当于主线程的耗时
+        final long jitterNanos = startNanos - frameTimeNanos;
+        if (jitterNanos >= mFrameIntervalNanos) {//这里整体时间出现大于一针
+          // 下面的罗就就是计算到底要跳多少帧
+          // 1帧是16.66毫秒，计算当前跳多少帧，比如超时166.66，那么就是跳过10帧
+          final long skippedFrames = jitterNanos / mFrameIntervalNanos;
+            if (skippedFrames >= SKIPPED_FRAME_WARNING_LIMIT) {
+                Log.i(TAG, "Skipped " + skippedFrames + " frames!  "
+                        + "The application may be doing too much work on its main thread.");
+            }
+          	// 距离上一帧有多久，一帧是16毫秒，多出来的这一帧是多少秒
+            final long lastFrameOffset = jitterNanos % mFrameIntervalNanos;
+            if (DEBUG_JANK) {
+                Log.d(TAG, "Missed vsync by " + (jitterNanos * 0.000001f) + " ms "
+                        + "which is more than the frame interval of "
+                        + (mFrameIntervalNanos * 0.000001f) + " ms!  "
+                        + "Skipping " + skippedFrames + " frames and setting frame "
+                        + "time to " + (lastFrameOffset * 0.000001f) + " ms in the past.");
+            }
+          
+          	// 修正时间，将时间固定在16毫秒
+            frameTimeNanos = startNanos - lastFrameOffset;
+        }
+			
+      	// 避免下一帧提前渲染，如果本次vsync执行doframe比上一帧计划的提前时间早
+      	// 则将本帧放到下一个vsync上进行渲染
+      	// 提前渲染就会出现，画面重叠现象16.6
+        if (frameTimeNanos < mLastFrameTimeNanos) {
+          	// 卡顿优化 -->> 30帧
+            if (DEBUG_JANK) {
+                Log.d(TAG, "Frame time appears to be going backwards.  May be due to a "
+                        + "previously skipped frame.  Waiting for next vsync.");
+            }
+          	// 
+            scheduleVsyncLocked();
+            return;
+        }
+
+        if (mFPSDivisor > 1) {
+            long timeSinceVsync = frameTimeNanos - mLastFrameTimeNanos;
+            if (timeSinceVsync < (mFrameIntervalNanos * mFPSDivisor) && timeSinceVsync > 0) {
+                scheduleVsyncLocked();
+                return;
+            }
+        }
+				//记录当前帧的原始vsync时间-修正后的时间
+        mFrameInfo.setVsync(intendedFrameTimeNanos, frameTimeNanos);
+      	// 重置标识位，可再次进入scheduleFramelock
+        mFrameScheduled = false;
+      	// 记录上一次的vsync的时间
+        mLastFrameTimeNanos = frameTimeNanos;
+    }
+
+    try {
+        Trace.traceBegin(Trace.TRACE_TAG_VIEW, "Choreographer#doFrame");
+        AnimationUtils.lockAnimationClock(frameTimeNanos / TimeUtils.NANOS_PER_MS);
+
+        mFrameInfo.markInputHandlingStart();
+        doCallbacks(Choreographer.CALLBACK_INPUT, frameTimeNanos);
+				
+        mFrameInfo.markAnimationsStart();
+        doCallbacks(Choreographer.CALLBACK_ANIMATION, frameTimeNanos);
+				// 一大堆的callback，回到了最初设置的地方
+        mFrameInfo.markPerformTraversalsStart();
+        doCallbacks(Choreographer.CALLBACK_TRAVERSAL, frameTimeNanos);
+
+        doCallbacks(Choreographer.CALLBACK_COMMIT, frameTimeNanos);
+    } finally {
+        AnimationUtils.unlockAnimationClock();
+        Trace.traceEnd(Trace.TRACE_TAG_VIEW);
+    }
+
+    if (DEBUG_FRAMES) {
+        final long endNanos = System.nanoTime();
+        Log.d(TAG, "Frame " + frame + ": Finished, took "
+                + (endNanos - startNanos) * 0.000001f + " ms, latency "
+                + (startNanos - frameTimeNanos) * 0.000001f + " ms.");
+    }
+}
+```
+
+编舞者监控帧率
+
+如果要出高刷手机 90Hz，framework一定会改过，主要是编舞者的时间，这个时间通常是在配置文件中，System.properties
+
+```java
+mChoreographer.postCallback(
+        Choreographer.CALLBACK_TRAVERSAL, mTraversalRunnable, null);
+```
+
+```java
+final class TraversalRunnable implements Runnable {
+    @Override
+    public void run() {
+        doTraversal();
+    }
+}
+```
+
+```java
+private void performTraversals() { //真正的开始进行绘制
+    // cache mView since it is used so much below...
+    final View host = mView;
+		relayoutWindow
+    performMeasure
+    performLayout
+    performDraw  
+```
+
+Sureface可以理解为实体，装一组数据，装xy，宽、高，各种描述这个板子的数据。
+
+```java
+private int relayoutWindow(WindowManager.LayoutParams params, int viewVisibility,
+        boolean insetsPending) throws RemoteException {
+		
+  	// mWindowSession 作为和WMS进行通信的桥接模式 
+    int relayoutResult = mWindowSession.relayout(mWindow, mSeq, params,
+            (int) (mView.getMeasuredWidth() * appScale + 0.5f),
+            (int) (mView.getMeasuredHeight() * appScale + 0.5f), viewVisibility,
+            insetsPending ? WindowManagerGlobal.RELAYOUT_INSETS_PENDING : 0, frameNumber,
+            mWinFrame, mPendingOverscanInsets, mPendingContentInsets, mPendingVisibleInsets,
+            mPendingStableInsets, mPendingOutsets, mPendingBackDropFrame, mPendingDisplayCutout,
+            mPendingMergedConfiguration, mSurface);
+
+    mPendingAlwaysConsumeNavBar =
+            (relayoutResult & WindowManagerGlobal.RELAYOUT_RES_CONSUME_ALWAYS_NAV_BAR) != 0;
+
+    if (restore) {
+        params.restore();
+    }
+
+    if (mTranslator != null) {
+        mTranslator.translateRectInScreenToAppWinFrame(mWinFrame);
+        mTranslator.translateRectInScreenToAppWindow(mPendingOverscanInsets);
+        mTranslator.translateRectInScreenToAppWindow(mPendingContentInsets);
+        mTranslator.translateRectInScreenToAppWindow(mPendingVisibleInsets);
+        mTranslator.translateRectInScreenToAppWindow(mPendingStableInsets);
+    }
+    return relayoutResult;
+}
+```
+
+
+
+mWindowSession的实例对象
+
+```java
+package com.android.server.wm;
+class Session extends IWindowSession.Stub implements IBinder.DeathRecipient {
+```
+
+调用了WMS的relayoutWindow
+
+```
+@Override
+public int relayout(IWindow window, int seq, WindowManager.LayoutParams attrs,
+        int requestedWidth, int requestedHeight, int viewFlags, int flags, long frameNumber,
+        Rect outFrame, Rect outOverscanInsets, Rect outContentInsets, Rect outVisibleInsets,
+        Rect outStableInsets, Rect outsets, Rect outBackdropFrame,
+        DisplayCutout.ParcelableWrapper cutout, MergedConfiguration mergedConfiguration,
+        Surface outSurface) {
+    if (false) Slog.d(TAG_WM, ">>>>>> ENTERED relayout from "
+            + Binder.getCallingPid());
+    Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, mRelayoutTag);
+    int res = mService.relayoutWindow(this, window, seq, attrs,
+            requestedWidth, requestedHeight, viewFlags, flags, frameNumber,
+            outFrame, outOverscanInsets, outContentInsets, outVisibleInsets,
+            outStableInsets, outsets, outBackdropFrame, cutout,
+            mergedConfiguration, outSurface);
+    Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
+    if (false) Slog.d(TAG_WM, "<<<<<< EXITING relayout to "
+            + Binder.getCallingPid());
+    return res;
+}
+```
+
+```
+@Override
+public int relayout(IWindow window, int seq, WindowManager.LayoutParams attrs,
+        int requestedWidth, int requestedHeight, int viewFlags, int flags, long frameNumber,
+        Rect outFrame, Rect outOverscanInsets, Rect outContentInsets, Rect outVisibleInsets,
+        Rect outStableInsets, Rect outsets, Rect outBackdropFrame,
+        DisplayCutout.ParcelableWrapper cutout, MergedConfiguration mergedConfiguration,
+        Surface outSurface) {
+    if (false) Slog.d(TAG_WM, ">>>>>> ENTERED relayout from "
+            + Binder.getCallingPid());
+    Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, mRelayoutTag);
+    int res = mService.relayoutWindow(this, window, seq, attrs,
+            requestedWidth, requestedHeight, viewFlags, flags, frameNumber,
+            outFrame, outOverscanInsets, outContentInsets, outVisibleInsets,
+            outStableInsets, outsets, outBackdropFrame, cutout,
+            mergedConfiguration, outSurface);
+    Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
+    if (false) Slog.d(TAG_WM, "<<<<<< EXITING relayout to "
+            + Binder.getCallingPid());
+    return res;
+}
+```
+
+```java
+// 对于这个窗体的可见性，有变更，会进行重新计算、
+// WMS记录窗体的信息
+// 建立c层的surface
+public int relayoutWindow(Session session, IWindow client, int seq, LayoutParams attrs,
+        int requestedWidth, int requestedHeight, int viewVisibility, int flags,
+        long frameNumber, Rect outFrame, Rect outOverscanInsets, Rect outContentInsets,
+        Rect outVisibleInsets, Rect outStableInsets, Rect outOutsets, Rect outBackdropFrame,
+        DisplayCutout.ParcelableWrapper outCutout, MergedConfiguration mergedConfiguration,
+        Surface outSurface) {
+		
+		// mWindowMa pclass WindowHashMap extends HashMap<IBinder, WindowState>
+  	// 是所有chuang IBinder是IWindow即WindowToken，WindowState保存了窗体的数据
+    synchronized(mWindowMap) {
+    
+      //如果窗体发生变化，是否发生旋转，可见性是否变化等，则进行重新计算
+      
+      // 最终返回一个c层的SUrface地址 2027行
+			result = createSurfaceControl(outSurface, result, win, winAnimator);
+      // surfacecontrol.cpp gerSurface  
+```
+
+java层面的surface代表的是用户数据提供
+
+c++层面的surface根据用户数据提供以及，surfaceFlinger的相关关注
