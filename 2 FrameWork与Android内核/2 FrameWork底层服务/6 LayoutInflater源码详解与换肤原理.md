@@ -487,11 +487,17 @@ static class LayoutInflaterCompatBaseImpl {
 }
 ```
 
-
-
 ## AppCompatActivity与Factory2
 
 ## 换肤框架的实现思路分析
+
+Android中的动态加载技术
+
+动态调用外部的dex，也可以动态加载so库，动态加载dex/jar/apk文件等
+
+
+
+
 
 ## 打造动态主题换肤框架
 
