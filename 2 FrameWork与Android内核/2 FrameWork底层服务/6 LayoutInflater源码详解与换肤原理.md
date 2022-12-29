@@ -495,7 +495,105 @@ Android中的动态加载技术
 
 动态调用外部的dex，也可以动态加载so库，动态加载dex/jar/apk文件等
 
+### 怎样获取资源包中的资源
 
+创建资源包的resource
+
+```java
+// 根据资源包的存储路径去加载资源
+public void loadSkinApk(String path) {
+    // 真正的目的这是的到资源包的资源对象
+    PackageManager packageManager = context.getPackageManager();
+    PackageInfo packageArchiveInfo = packageManager.getPackageArchiveInfo(path, PackageManager.GET_ACTIVITIES);
+    packageName = packageArchiveInfo.packageName;
+
+
+    AssetManager asset = null;
+    try {
+        asset = AssetManager.class.newInstance();
+        Method addAssetPath = asset.getClass().getMethod("addAssetPath", String.class);
+        addAssetPath.setAccessible(true);
+        addAssetPath.invoke(asset, path);
+
+
+        // 拿到资源对象
+        resources = new Resources(asset, context.getResources().getDisplayMetrics(), context.getResources().getConfiguration());
+
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+}
+```
+
+替换掉Color和drawable
+
+```java
+/**
+ * @param id 需要去匹配的资源id
+ * @return 返回 匹配到的资源ID
+ */
+public Drawable getDrawable(int id) {
+    if (resourceIsNUll()) {
+        return ContextCompat.getDrawable(context, id);
+    }
+
+    // 获取到资源名字和资源类型
+    Resources resources = context.getResources();
+    String resourceTypeName = resources.getResourceTypeName(id);
+    String resourceEntryName = resources.getResourceEntryName(id);
+    // 返回到匹配到的资源id
+    int identifier = this.resources.getIdentifier(resourceEntryName, resourceTypeName, packageName);
+
+    if (identifier == 0) {
+        return ContextCompat.getDrawable(context, id);
+    }
+
+    return this.resources.getDrawable(identifier);
+}
+
+
+/**
+ * @param id 需要去匹配的资源id
+ * @return 返回 匹配到的资源ID
+ */
+public int getDrawableId(int id) {
+    if (resourceIsNUll()) {
+        return id;
+    }
+
+    // 获取到资源名字和资源类型
+    Resources resources = context.getResources();
+    String resourceTypeName = resources.getResourceTypeName(id);
+    String resourceEntryName = resources.getResourceEntryName(id);
+    // 返回到匹配到的资源id
+    int identifier = this.resources.getIdentifier(resourceEntryName, resourceTypeName, packageName);
+
+    if (identifier == 0) {
+        return id;
+    }
+
+    return identifier;
+}
+```
+
+怎样确定当前哪些资源需要替换
+
+​	通过自定义属性来确定如何换肤
+
+```xml
+<resources>
+    <declare-styleable name="Skinable">
+        <attr name="is_skin" format="boolean" />
+        <attr name="tag" format="string" />
+    </declare-styleable>
+</resources>
+```
+
+怎么进行资源的替换
+
+
+
+在什么时候将皮肤中的资源替换到当前客户端中
 
 
 
