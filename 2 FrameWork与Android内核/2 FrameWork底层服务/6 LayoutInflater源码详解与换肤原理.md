@@ -591,9 +591,133 @@ public int getDrawableId(int id) {
 
 怎么进行资源的替换
 
+```java
+/**
+* 判断资源包中是否有要替换的资源
+* @param resId
+* @return
+*/
+public int getIdentifier(int resId) {
+  if (isDefaultSkin) {
+    return resId;
+  }
+  //bg
+  String resName = mAppResources.getResourceEntryName(resId);
+  //
+  String resType = mAppResources.getResourceTypeName(resId);
+  //再通过bg 去找目标apk的bg
+  int skinId = mSkinResources.getIdentifier(resName, resType, mSkinPkgName);
+  return skinId;
+}
 
+// 如果有要替换的资源，则将要替换的资源返回
+public int getColor(int resId) {
+    if (isDefaultSkin) {
+        return mAppResources.getColor(resId);
+    }
+    int skinId = getIdentifier(resId);
+    if (skinId == 0) {
+        return mAppResources.getColor(resId);
+    }
+    return mSkinResources.getColor(skinId);
+}
+
+public ColorStateList getColorStateList(int resId) {
+    if (isDefaultSkin) {
+        return mAppResources.getColorStateList(resId);
+    }
+    int skinId = getIdentifier(resId);
+    if (skinId == 0) {
+        return mAppResources.getColorStateList(resId);
+    }
+    return mSkinResources.getColorStateList(skinId);
+}
+
+public Drawable getDrawable(int resId) {
+    if (isDefaultSkin) {
+        return mAppResources.getDrawable(resId);
+    }
+    //通过 app的resource 获取id 对应的 资源名 与 资源类型
+    //找到 皮肤包 匹配 的 资源名资源类型 的 皮肤包的 资源 ID
+    int skinId = getIdentifier(resId);
+    if (skinId == 0) {
+        return mAppResources.getDrawable(resId);
+    }
+    return mSkinResources.getDrawable(skinId);
+}
+
+
+/**
+ * 可能是Color 也可能是drawable
+ *
+ * @return
+ */
+public Object getBackground(int resId) {
+    String resourceTypeName = mAppResources.getResourceTypeName(resId);
+    if ("color".equals(resourceTypeName)) {
+        return getColor(resId);
+    } else {
+        // drawable
+        return getDrawable(resId);
+    }
+}
+```
 
 在什么时候将皮肤中的资源替换到当前客户端中
+
+通用的bean，用来统一管理资源的替换
+
+```java
+public void apply() {
+    for (ViewAttr viewAttr : viewAttrs) {
+        Drawable left = null, top = null, right = null, bottom = null;
+        switch (viewAttr.attributeName) {
+            case "background":
+                Object background = SkinManager.getInstance().getBackground(viewAttr
+                        .resId);
+                //背景可能是 @color 也可能是 @drawable
+                if (background instanceof Integer) {
+                    view.setBackgroundColor((int) background);
+                } else {
+                    ViewCompat.setBackground(view, (Drawable) background);
+                }
+                break;
+            case "src":
+                background = SkinManager.getInstance().getBackground(viewAttr
+                        .resId);
+                if (background instanceof Integer) {
+                    ((ImageView) view).setImageDrawable(new ColorDrawable((Integer)
+                            background));
+                } else {
+                    ((ImageView) view).setImageDrawable((Drawable) background);
+                }
+                break;
+            case "textColor":
+                ((TextView) view).setTextColor(SkinManager.getInstance().getColorStateList
+                        (viewAttr.resId));
+                break;
+            case "drawableLeft":
+                left = SkinManager.getInstance().getDrawable(viewAttr.resId);
+                break;
+            case "drawableTop":
+                top = SkinManager.getInstance().getDrawable(viewAttr.resId);
+                break;
+            case "drawableRight":
+                right = SkinManager.getInstance().getDrawable(viewAttr.resId);
+                break;
+            case "drawableBottom":
+                bottom = SkinManager.getInstance().getDrawable(viewAttr.resId);
+                break;
+            default:
+                break;
+        }
+        if (null != left || null != right || null != top || null != bottom) {
+            ((TextView) view).setCompoundDrawablesWithIntrinsicBounds(left, top, right,
+                    bottom);
+        }
+    }
+}
+```
 
 
 
