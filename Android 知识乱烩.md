@@ -20,26 +20,30 @@
 
 ```java
 public final class Bitmap implements Parcelable {
-  		//Bitmap可以通过createBitmap进行创建，当然也有一些其他的方式
-      public static Bitmap createBitmap(int width, int height,
-            @NonNull Config config, boolean hasAlpha) {
-        return createBitmap(null, width, height, config, hasAlpha);
+  //c层创建完成会将内存地址返回
+  private final long mNativePtr;
+  public final class Bitmap implements Parcelable {
+        //Bitmap可以通过createBitmap进行创建，当然也有一些其他的方式
+        public static Bitmap createBitmap(int width, int height,
+              @NonNull Config config, boolean hasAlpha) {
+          return createBitmap(null, width, height, config, hasAlpha);
+        }
+
+   public static Bitmap createBitmap(@Nullable DisplayMetrics display, int width, int height,@NonNull Config config, boolean hasAlpha, @NonNull ColorSpace colorSpace) {
+          ...
+          // 经过多种重载的调用后，最终会进入到一个nativeCreate的调用，进入到c层。
+          Bitmap bm = nativeCreate(null, 0, width, width, height, config.nativeInt, true,
+                  colorSpace == null ? 0 : colorSpace.getNativeInstance());
+          ...
+          return bm;
       }
-  
-  	    public static Bitmap createBitmap(@Nullable DisplayMetrics display, int width, int height,@NonNull Config config, boolean hasAlpha, @NonNull ColorSpace colorSpace) {
-        ...
-        // 经过多种重载的调用后，最终会进入到一个nativeCreate的调用，进入到c层。
-        Bitmap bm = nativeCreate(null, 0, width, width, height, config.nativeInt, true,
-                colorSpace == null ? 0 : colorSpace.getNativeInstance());
-				...
-        return bm;
-    }
-  
+
 ```
 
 **C层：**
 
 ```c++
+/framework/base/core/anndroid/jni/android/graphics/Bitmap.cpp
 //c层方法定义
 static const JNINativeMethod gBitmapMethods[] = {
     {   "nativeCreate",             "([IIIIIIZ[FLandroid/graphics/ColorSpace$Rgb$TransferParameters;)Landroid/graphics/Bitmap;",
@@ -58,8 +62,6 @@ static jobject Bitmap_creator(JNIEnv* env, jobject, jintArray jColors,
     if (!nativeBitmap) {
         return NULL;
     }
-
-
     return createBitmap(env, nativeBitmap.release(), getPremulBitmapCreateFlags(isMutable));
 }
  
